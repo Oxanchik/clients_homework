@@ -2,7 +2,7 @@ import os
 from typing import List, Tuple
 
 import psycopg2
-from psycopg2 import sql
+from psycopg2 import sql, errors
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,6 +45,8 @@ def create_db_structure(conn):
                 first_name VARCHAR(100) NOT NULL,
                 last_name  VARCHAR(100) NOT NULL,
                 email      VARCHAR(255) NOT NULL UNIQUE
+                CONSTRAINT proper_email 
+                    CHECK (email ~* '^[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+[.][A-Za-z]+$')
             );
         """)
 
@@ -68,23 +70,47 @@ def add_client(conn, first_name: str, last_name: str, email: str, phones: list[s
 
     phones = phones or []
 
-    with conn.cursor() as cur_add:
-        cur_add.execute(
-            "INSERT INTO clients (first_name, last_name, email) VALUES (%s, %s, %s) RETURNING client_id",
-            (first_name, last_name, email)
-        )
-        client_id = cur_add.fetchone()[0]
+    try:
+        with conn.cursor() as cur_add:
+            cur_add.execute(
+                "INSERT INTO clients (first_name, last_name, email) VALUES (%s, %s, %s) RETURNING client_id",
+                (first_name, last_name, email)
+            )
+            client_id = cur_add.fetchone()[0]
 
-        if phones:
-            phone_query = "INSERT INTO phones (client_id, phone) VALUES (%s, %s) RETURNING phone_id"
-            for phone in phones:
-                cur_add.execute(phone_query, (client_id, phone))
+            if phones:
+                phone_query = "INSERT INTO phones (client_id, phone) VALUES (%s, %s) RETURNING phone_id"
+                for phone in phones:
+                    cur_add.execute(phone_query, (client_id, phone))
 
         conn.commit()
+
         phone_count = len(phones)
         print(f"\n✅ Клиент '{first_name} {last_name}' добавлен с ID {client_id}")
         print(f"Добавлено телефонов: {phone_count}")
         return client_id
+
+    except errors.CheckViolation as e:
+        print(f"\n❌ Неверный email '{email}'!")
+        print(f"   Подробности: {e.pgerror}")
+        conn.rollback()
+        return None
+
+    except errors.UniqueViolation as e:
+        print(f"\n❌ Email '{email}' уже существует!")
+        print(f"   Подробности: {e.pgerror}")
+        conn.rollback()
+        return None
+
+    except psycopg2.Error as e:
+        print(f"\n❌ Ошибка БД: {e}")
+        conn.rollback()
+        return None
+
+    except Exception as e:
+        print(f"\n❌ Неожиданная ошибка: {e}")
+        conn.rollback()
+        return None
 
 
 def add_phone(conn, client_id: int, phone: str) -> int:
@@ -150,9 +176,11 @@ def update_client(conn, client_id: int = None, first_name: str = None, last_name
     """
     all_params = update_params + search_params
 
-    with conn.cursor() as cur_upd:
-        cur_upd.execute(query, all_params)
-        result = cur_upd.fetchone()
+    try:
+        with conn.cursor() as cur_upd:
+            cur_upd.execute(query, all_params)
+            result = cur_upd.fetchone()
+
         conn.commit()
 
         if result:
@@ -161,6 +189,20 @@ def update_client(conn, client_id: int = None, first_name: str = None, last_name
             print(f"   Email изменён на: {cemail}")
         else:
             print("❌ Клиент не найден")
+
+    except errors.CheckViolation as e:
+        print(f"❌ Новый email НЕВАЛИДНЫЙ!")
+        print(f"   Подробности: {e.pgerror}")
+        conn.rollback()
+
+    except errors.UniqueViolation as e:
+        print(f"❌ Email уже используется другим клиентом!")
+        print(f"   Подробности: {e.pgerror}")
+        conn.rollback()
+
+    except Exception as e:
+        print(f"❌ Ошибка обновления: {e}")
+        conn.rollback()
 
 
 def delete_phone(conn, client_id: int = None, phone: str = None):
@@ -350,6 +392,8 @@ if __name__ == '__main__':
         client2_id = add_client(conn_clients, "Мария", "Сидорова", "maria@example.com")
         client3_id = add_client(conn_clients, "Алексей", "Комаров", "alexey@example.ru", ["+7-910-258-79-46", "+7-916-789-46-13"])
         client4_id = add_client(conn_clients, "Сергей", "Петров", "sergey@example.ru")
+        client5_id = add_client(conn_clients, "Сергей", "Петров", "sergey@example.ru")
+
 
         # 3. Добавляем телефоны
         add_phone(conn_clients, client1_id, "+7-903-321-11-22")
@@ -381,6 +425,10 @@ if __name__ == '__main__':
         f_name2 = "Иван"
         print(f"\nОбновляем запись клиента '{f_name2}'")
         update_client(conn_clients, first_name=f_name2, email="new_ivan@example.com")
+
+        f_name2 = "Иван"
+        print(f"\nОбновляем запись клиента '{f_name2}'")
+        update_client(conn_clients, first_name=f_name2, email="new_mail")
 
         print("\nПопытка обновить запись несуществующего клиента")
         update_client(conn_clients, first_name='Николай', email="nik@example.com")
